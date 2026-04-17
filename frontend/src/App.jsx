@@ -37,7 +37,8 @@ const Navbar = ({ isAuthenticated, setIsAuthenticated }) => {
             <Link to="/dashboard" className="nav-btn">Dashboard</Link>
             {localStorage.getItem('role') === 'admin' && <Link to="/admin" className="nav-btn">Admin</Link>}
             <button className="nav-btn" onClick={async () => {
-              await fetch('http://localhost:5000/api/auth/logout', { method: 'POST', credentials: 'include' });
+              const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+              await fetch(`${BE_URL}/api/auth/logout`, { method: 'POST', credentials: 'include' });
               localStorage.removeItem('auth');
               localStorage.removeItem('role');
               setIsAuthenticated(false);
@@ -77,7 +78,8 @@ const Dashboard = () => {
     if(location.search.includes('auth=ig-success')) alert("Instagram Account successfully authorized! 🎉");
     
     // Check auth status from backend API
-    fetch("http://localhost:5000/api/auth/status", { credentials: 'include' })
+    const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+    fetch(`${BE_URL}/api/auth/status`, { credentials: 'include' })
       .then(res => res.json())
       .then(data => {
          setYtLinked(data.ytLinked);
@@ -92,7 +94,8 @@ const Dashboard = () => {
     setLoading(true); setResult(null); setError(null);
 
     try {
-      const response = await fetch("http://localhost:5000/api/generate", {
+      const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+      const response = await fetch(`${BE_URL}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: 'include',
@@ -112,13 +115,15 @@ const Dashboard = () => {
   };
 
   const handleUpload = async (short, platform) => {
-    if(platform === 'youtube' && !ytLinked) { alert("You must link your YouTube account first!"); window.location.href = `http://localhost:5000/auth/google`; return; }
-    if(platform === 'facebook' && !fbLinked) { alert("You must link your Facebook account first!"); window.location.href = `http://localhost:5000/auth/facebook`; return; }
-    if(platform === 'instagram' && !igLinked) { alert("You must link your Instagram account first!"); window.location.href = `http://localhost:5000/auth/instagram`; return; }
+    const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+    if(platform === 'youtube' && !ytLinked) { alert("You must link your YouTube account first!"); window.location.href = `${BE_URL}/auth/google`; return; }
+    if(platform === 'facebook' && !fbLinked) { alert("You must link your Facebook account first!"); window.location.href = `${BE_URL}/auth/facebook`; return; }
+    if(platform === 'instagram' && !igLinked) { alert("You must link your Instagram account first!"); window.location.href = `${BE_URL}/auth/instagram`; return; }
     
     alert(`Initiating ${platform} Upload for: ${short.title}\nPlease wait, this may take a minute...`);
     try {
-        const response = await fetch("http://localhost:5000/api/upload", {
+        const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+        const response = await fetch(`${BE_URL}/api/upload`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             credentials: 'include',
@@ -146,15 +151,15 @@ const Dashboard = () => {
         <div style={{display: 'flex', gap: '20px', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '20px'}}>
             <div style={{padding: '10px 20px', borderRadius: '12px', background: ytLinked ? 'rgba(74, 222, 128, 0.1)' : 'rgba(255, 255, 255, 0.05)', color: ytLinked ? '#4ade80' : '#a1a1aa', display: 'flex', alignItems: 'center', gap: '10px', border: `1px solid ${ytLinked ? '#4ade80' : 'rgba(255,255,255,0.1)'}`}}>
                <Youtube size={20} />
-               {ytLinked ? <span>YouTube Linked</span> : <a href="http://localhost:5000/auth/google" style={{color: '#fff', textDecoration: 'none'}}>Link YouTube</a>}
+               {ytLinked ? <span>YouTube Linked</span> : <a href={`${import.meta.env.VITE_BACKEND_URL || "http://localhost:5000"}/auth/google`} style={{color: '#fff', textDecoration: 'none'}}>Link YouTube</a>}
             </div>
             <div style={{padding: '10px 20px', borderRadius: '12px', background: fbLinked ? 'rgba(74, 222, 128, 0.1)' : 'rgba(255, 255, 255, 0.05)', color: fbLinked ? '#4ade80' : '#a1a1aa', display: 'flex', alignItems: 'center', gap: '10px', border: `1px solid ${fbLinked ? '#4ade80' : 'rgba(255,255,255,0.1)'}`}}>
                <Facebook size={20} />
-               {fbLinked ? <span>Facebook Linked</span> : <a href="http://localhost:5000/auth/facebook" style={{color: '#fff', textDecoration: 'none'}}>Link Facebook</a>}
+               {fbLinked ? <span>Facebook Linked</span> : <a href={`${import.meta.env.VITE_BACKEND_URL || "http://localhost:5000"}/auth/facebook`} style={{color: '#fff', textDecoration: 'none'}}>Link Facebook</a>}
             </div>
             <div style={{padding: '10px 20px', borderRadius: '12px', background: igLinked ? 'rgba(74, 222, 128, 0.1)' : 'rgba(255, 255, 255, 0.05)', color: igLinked ? '#4ade80' : '#a1a1aa', display: 'flex', alignItems: 'center', gap: '10px', border: `1px solid ${igLinked ? '#4ade80' : 'rgba(255,255,255,0.1)'}`}}>
                <Instagram size={20} />
-               {igLinked ? <span>Instagram Linked</span> : <a href="http://localhost:5000/auth/instagram" style={{color: '#fff', textDecoration: 'none'}}>Link Instagram</a>}
+               {igLinked ? <span>Instagram Linked</span> : <a href={`${import.meta.env.VITE_BACKEND_URL || "http://localhost:5000"}/auth/instagram`} style={{color: '#fff', textDecoration: 'none'}}>Link Instagram</a>}
             </div>
         </div>
         
@@ -234,8 +239,9 @@ const Login = ({ setIsAuthenticated }) => {
     e.preventDefault();
     setError(null);
     try {
+      const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
       const endpoint = isRegistering ? '/api/auth/register' : '/api/auth/login';
-      const response = await fetch(`http://localhost:5000${endpoint}`, {
+      const response = await fetch(`${BE_URL}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: 'include',
@@ -283,7 +289,8 @@ const Admin = () => {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-     fetch('http://localhost:5000/api/admin/users', { credentials: 'include' })
+     const BE_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+     fetch(`${BE_URL}/api/admin/users`, { credentials: 'include' })
        .then(res => {
          if (!res.ok) throw new Error("Security Access Denied. Only Admins can view this data.");
          return res.json();

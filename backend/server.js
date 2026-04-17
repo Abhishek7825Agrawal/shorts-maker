@@ -18,7 +18,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 app.use(cors({
-    origin: 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
     credentials: true // Required for session cookies
 }));
 app.use(express.json());
@@ -48,7 +48,7 @@ app.use('/output', express.static(outputDir));
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    'http://localhost:5000/auth/google/callback'
+    `${process.env.BACKEND_URL || 'http://localhost:5000'}/auth/google/callback`
 );
 
 app.get('/auth/google', (req, res) => {
@@ -76,10 +76,10 @@ app.get('/auth/google/callback', async (req, res) => {
             saveDb(db);
         }
         
-        res.redirect('http://localhost:5173/dashboard?auth=success');
+        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=success`);
     } catch (e) {
         console.error("Auth Error:", e.message);
-        res.redirect('http://localhost:5173/dashboard?auth=error');
+        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=error`);
     }
 });
 
@@ -150,7 +150,7 @@ app.get('/auth/facebook', (req, res) => {
         db.users[req.session.userId].fbLinked = true;
         saveDb(db);
     }
-    res.redirect('http://localhost:5173/dashboard?auth=fb-success');
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=fb-success`);
 });
 
 // --- Mock Instagram Auth ---
@@ -162,7 +162,7 @@ app.get('/auth/instagram', (req, res) => {
         db.users[req.session.userId].igLinked = true;
         saveDb(db);
     }
-    res.redirect('http://localhost:5173/dashboard?auth=ig-success');
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=ig-success`);
 });
 
 app.post('/api/generate', async (req, res) => {
@@ -265,7 +265,7 @@ app.post('/api/generate', async (req, res) => {
             });
 
             generatedShorts.push({
-                shortUrl: `http://localhost:${PORT}/output/${jobId}-short-${i}.mp4`,
+                shortUrl: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/output/${jobId}-short-${i}.mp4`,
                 title: `Short Variant ${i+1} 🚀`,
                 description: `${currentCaption} #${currentTags.join(' #')}`,
                 tags: currentTags
