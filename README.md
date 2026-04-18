@@ -37,5 +37,33 @@ Since this is a full-stack project, you need to run both the **Backend** and the
 
 Now, open `http://localhost:5173/` in your browser and enjoy your God-mode dashboard!
 
+## Deployment OAuth Setup
+
+For a deployed app, do not leave the URLs as localhost. Set these environment variables on your hosting provider:
+
+Backend:
+```bash
+NODE_ENV=production
+SERVER_URL=https://your-backend-domain.com
+CLIENT_URL=https://your-frontend-domain.com
+SESSION_SECRET=use-a-long-random-secret
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_REDIRECT_URI=https://your-backend-domain.com/auth/google/callback
+```
+
+Frontend:
+```bash
+VITE_API_URL=https://your-backend-domain.com
+```
+
+In Google Cloud Console, add this exact Authorized redirect URI to the same OAuth client:
+
+```text
+https://your-backend-domain.com/auth/google/callback
+```
+
+If Google shows `Error 401: invalid_client`, the deployed backend is usually using a missing/wrong `GOOGLE_CLIENT_ID`, missing/wrong `GOOGLE_CLIENT_SECRET`, or a redirect URI that does not belong to that OAuth client.
+
 ## 🚧 What's Next?
 In the next phases, we will integrate `yt-dlp` and `ffmpeg` in the backend to physically download, trim, and process the videos. We will also hook up MongoDB to securely store social media accounts.

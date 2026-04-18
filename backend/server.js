@@ -13,22 +13,38 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const SERVER_URL = (process.env.SERVER_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const CLIENT_URL = (process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `${SERVER_URL}/auth/google/callback`;
+const allowedOrigins = [
+    CLIENT_URL,
+    ...(process.env.CORS_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean)
+];
+const isProduction = process.env.NODE_ENV === 'production';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    },
     credentials: true // Required for session cookies
 }));
 app.use(express.json());
+app.set('trust proxy', 1);
 
 // Session config for authentication persistence
 app.use(session({
-    secret: 'shortsmaker-super-secret-key',
+    secret: process.env.SESSION_SECRET || 'shortsmaker-super-secret-key',
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // Local dev allows false
+    cookie: {
+        secure: isProduction,
+        sameSite: isProduction ? 'none' : 'lax',
+        maxAge: 24 * 60 * 60 * 1000
+    }
 }));
 
 // Local JSON DB
@@ -48,10 +64,15 @@ app.use('/output', express.static(outputDir));
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    `${process.env.BACKEND_URL || 'http://localhost:5000'}/auth/google/callback`
+    GOOGLE_REDIRECT_URI
 );
 
 app.get('/auth/google', (req, res) => {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+        console.error('Google OAuth is not configured. Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET.');
+        return res.redirect(`${CLIENT_URL}/dashboard?auth=google-config-error`);
+    }
+
     const url = oauth2Client.generateAuthUrl({
         access_type: 'offline', // ensures we get a refresh token
         scope: ['https://www.googleapis.com/auth/youtube.upload'],
@@ -76,10 +97,10 @@ app.get('/auth/google/callback', async (req, res) => {
             saveDb(db);
         }
         
-        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=success`);
+        res.redirect(`${CLIENT_URL}/dashboard?auth=success`);
     } catch (e) {
         console.error("Auth Error:", e.message);
-        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=error`);
+        res.redirect(`${CLIENT_URL}/dashboard?auth=error`);
     }
 });
 
@@ -131,13 +152,16 @@ app.get('/api/admin/users', (req, res) => {
 app.get('/api/auth/status', (req, res) => {
     const db = getDb();
     const user = req.session.userId ? db.users[req.session.userId] : null;
+    if (!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
+    if (!req.session.fbLinked && user && user.fbLinked) req.session.fbLinked = true;
+    if (!req.session.igLinked && user && user.igLinked) req.session.igLinked = true;
     res.json({ 
         loggedIn: !!req.session.userId,
         email: req.session.userId,
         role: user ? user.role : null,
-        ytLinked: !!req.session.tokens,
-        fbLinked: !!req.session.fbLinked,
-        igLinked: !!req.session.igLinked
+        ytLinked: !!(req.session.tokens || (user && user.tokens)),
+        fbLinked: !!(req.session.fbLinked || (user && user.fbLinked)),
+        igLinked: !!(req.session.igLinked || (user && user.igLinked))
     });
 });
 
@@ -150,7 +174,7 @@ app.get('/auth/facebook', (req, res) => {
         db.users[req.session.userId].fbLinked = true;
         saveDb(db);
     }
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=fb-success`);
+    res.redirect(`${CLIENT_URL}/dashboard?auth=fb-success`);
 });
 
 // --- Mock Instagram Auth ---
@@ -162,7 +186,7 @@ app.get('/auth/instagram', (req, res) => {
         db.users[req.session.userId].igLinked = true;
         saveDb(db);
     }
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=ig-success`);
+    res.redirect(`${CLIENT_URL}/dashboard?auth=ig-success`);
 });
 
 app.post('/api/generate', async (req, res) => {
@@ -265,7 +289,7 @@ app.post('/api/generate', async (req, res) => {
             });
 
             generatedShorts.push({
-                shortUrl: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/output/${jobId}-short-${i}.mp4`,
+                shortUrl: `${SERVER_URL}/output/${jobId}-short-${i}.mp4`,
                 title: `Short Variant ${i+1} 🚀`,
                 description: `${currentCaption} #${currentTags.join(' #')}`,
                 tags: currentTags
@@ -295,6 +319,8 @@ app.post('/api/upload', async (req, res) => {
         const db = getDb();
 
         if (platform === 'youtube') {
+            const user = req.session.userId ? db.users[req.session.userId] : null;
+            if(!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
             if(!req.session.tokens) return res.status(401).json({ error: "Please Authorize your YouTube account first!" });
             
             oauth2Client.setCredentials(req.session.tokens);
