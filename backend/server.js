@@ -53,6 +53,24 @@ if(!fs.existsSync(dbPath)) fs.writeFileSync(dbPath, JSON.stringify({users: {}, l
 const getDb = () => JSON.parse(fs.readFileSync(dbPath));
 const saveDb = (data) => fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
 
+const ensureAdminUser = () => {
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@shortsmaker.ai';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
+    const db = getDb();
+
+    if (!db.users[adminEmail] || db.users[adminEmail].password !== adminPassword || db.users[adminEmail].role !== 'admin') {
+        db.users[adminEmail] = {
+            ...(db.users[adminEmail] || {}),
+            password: adminPassword,
+            role: 'admin',
+            createdAt: db.users[adminEmail]?.createdAt || new Date().toISOString()
+        };
+        saveDb(db);
+    }
+};
+
+ensureAdminUser();
+
 const tempDir = path.join(__dirname, 'temp');
 const outputDir = path.join(__dirname, 'output');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
