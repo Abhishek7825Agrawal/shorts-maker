@@ -13,9 +13,10 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const SERVER_URL = (process.env.SERVER_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-const CLIENT_URL = (process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `${SERVER_URL}/auth/google/callback`;
+const normalizeUrl = (url) => (url || '').trim().replace(/\/+$/, '');
+const SERVER_URL = normalizeUrl(process.env.SERVER_URL || process.env.BACKEND_URL || `http://localhost:${PORT}`);
+const CLIENT_URL = normalizeUrl(process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:5173');
+const GOOGLE_REDIRECT_URI = normalizeUrl(process.env.GOOGLE_REDIRECT_URI || `${SERVER_URL}/auth/google/callback`);
 const allowedOrigins = [
     CLIENT_URL,
     ...(process.env.CORS_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean)
@@ -85,11 +86,23 @@ const oauth2Client = new google.auth.OAuth2(
     GOOGLE_REDIRECT_URI
 );
 
+app.get('/api/debug/oauth', (req, res) => {
+    res.json({
+        serverUrl: SERVER_URL,
+        clientUrl: CLIENT_URL,
+        googleRedirectUri: GOOGLE_REDIRECT_URI,
+        hasGoogleClientId: !!process.env.GOOGLE_CLIENT_ID,
+        hasGoogleClientSecret: !!process.env.GOOGLE_CLIENT_SECRET
+    });
+});
+
 app.get('/auth/google', (req, res) => {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
         console.error('Google OAuth is not configured. Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET.');
         return res.redirect(`${CLIENT_URL}/dashboard?auth=google-config-error`);
     }
+
+    console.log(`Starting Google OAuth with redirect URI: ${GOOGLE_REDIRECT_URI}`);
 
     const url = oauth2Client.generateAuthUrl({
         access_type: 'offline', // ensures we get a refresh token
