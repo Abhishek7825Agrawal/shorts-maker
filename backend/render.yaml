@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: shorts-maker-backend
+    env: node
+    region: oregon
+    plan: free
+    # Build command: install deps then force-update yt-dlp binary to latest stable
+    # This is CRITICAL — YouTube breaks older yt-dlp versions weekly
+    buildCommand: |
+      npm install
+      echo "Updating yt-dlp binary to latest stable..."
+      node -e "
+        const path = require('path');
+        const { execSync } = require('child_process');
+        try {
+          const ytdlpBin = require.resolve('yt-dlp-exec/lib/index.js');
+          const binDir = path.join(path.dirname(ytdlpBin), '..', 'bin');
+          const binPath = path.join(binDir, 'yt-dlp');
+          console.log('yt-dlp bin path:', binPath);
+          execSync(binPath + ' -U', { stdio: 'inherit' });
+          console.log('yt-dlp updated successfully!');
+        } catch(e) {
+          console.log('yt-dlp self-update note:', e.message);
+        }
+      "
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000

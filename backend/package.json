@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "postinstall": "node -e \"const p=require('path'),{execSync}=require('child_process');try{const b=p.join(p.dirname(require.resolve('yt-dlp-exec/lib/index.js')),'..','bin','yt-dlp');execSync(b+' -U',{stdio:'inherit'});}catch(e){console.log('yt-dlp update skipped:',e.message);}\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

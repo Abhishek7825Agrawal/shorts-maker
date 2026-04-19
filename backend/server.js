@@ -369,21 +369,25 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
     try {
         console.log(`[${jobId}] Downloading: ${videoUrl}`);
 
-        // yt-dlp options tuned for hosted servers (bypasses YouTube bot checks)
+        // KEY FIX: Use Android player client — YouTube never blocks its own Android app
+        // This is the most reliable way to download from server IPs in 2025/2026
         await ytDlp(videoUrl, {
             output: tempVideoPath,
+            // Prefer 720p mp4, fallback to any best available
             format: 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             ffmpegLocation: ffmpegInstaller.path,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true,
+            // Mimic the official YouTube Android app — bypasses datacenter IP blocks
+            extractorArgs: 'youtube:player_client=android,web',
             addHeader: [
                 'referer:youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                // Official YouTube Android app User-Agent
+                'user-agent:com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip'
             ],
-            retries: 5,
-            fragmentRetries: 5,
-            // Use the best available format if the preferred one fails
+            noCheckCertificates: true,
+            noWarnings: true,
+            retries: 10,
+            fragmentRetries: 10,
+            // Abort if video is a playlist link (just take first video if so)
             noPlaylistVideos: true,
         });
 
