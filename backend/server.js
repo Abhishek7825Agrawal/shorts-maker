@@ -14,21 +14,100 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 const normalizeUrl = (url) => (url || '').trim().replace(/\/+$/, '');
-const SERVER_URL = normalizeUrl(process.env.SERVER_URL || process.env.BACKEND_URL || `http://localhost:${PORT}`);
-const CLIENT_URL = normalizeUrl(process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:5173');
-const GOOGLE_REDIRECT_URI = normalizeUrl(process.env.GOOGLE_REDIRECT_URI || `${SERVER_URL}/auth/google/callback`);
-const allowedOrigins = [
+const DEFAULT_SERVER_URL = `http://localhost:${PORT}`;
+const DEFAULT_CLIENT_URL = 'http://localhost:5173';
+const SERVER_URL = normalizeUrl(process.env.SERVER_URL || process.env.BACKEND_URL || DEFAULT_SERVER_URL);
+const CLIENT_URL = normalizeUrl(process.env.CLIENT_URL || process.env.FRONTEND_URL || DEFAULT_CLIENT_URL);
+const CONFIGURED_GOOGLE_REDIRECT_URI = normalizeUrl(process.env.GOOGLE_REDIRECT_URI || '');
+const OAUTH_SETUP_ERROR = 'google-redirect-uri-mismatch';
+const clientUrlVariants = new Set([
     CLIENT_URL,
+    CLIENT_URL.replace('localhost', '127.0.0.1'),
+    CLIENT_URL.replace('127.0.0.1', 'localhost'),
     ...(process.env.CORS_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean)
-];
-const isProduction = process.env.NODE_ENV === 'production';
+]);
+const allowedOrigins = [...clientUrlVariants].filter(Boolean);
+const isProduction = process.env.NODE_ENV === 'production' || SERVER_URL.startsWith('https://') || CLIENT_URL.startsWith('https://');
+const hasConfiguredClientUrl = !!(process.env.CLIENT_URL || process.env.FRONTEND_URL);
+const hasConfiguredServerUrl = !!(process.env.SERVER_URL || process.env.BACKEND_URL);
+
+const parseUrlOrigin = (value) => {
+    try {
+        return value ? new URL(value).origin : null;
+    } catch {
+        return null;
+    }
+};
+
+const getForwardedValue = (req, header) => {
+    const value = req.get(header);
+    return value ? value.split(',')[0].trim() : '';
+};
+
+const getRequestBaseUrl = (req) => {
+    if (hasConfiguredServerUrl) return SERVER_URL;
+
+    const proto = getForwardedValue(req, 'x-forwarded-proto') || req.protocol || 'http';
+    const host = getForwardedValue(req, 'x-forwarded-host') || req.get('host');
+
+    return host ? normalizeUrl(`${proto}://${host}`) : SERVER_URL;
+};
+
+const getGoogleRedirectUri = (req) => (
+    CONFIGURED_GOOGLE_REDIRECT_URI || `${getRequestBaseUrl(req)}/auth/google/callback`
+);
+
+const getClientBaseUrl = (req, fallbackState = {}) => {
+    if (hasConfiguredClientUrl) return CLIENT_URL;
+
+    return (
+        parseUrlOrigin(req.query.returnTo || fallbackState.returnTo) ||
+        parseUrlOrigin(req.get('origin')) ||
+        parseUrlOrigin(req.get('referer')) ||
+        CLIENT_URL
+    );
+};
+
+const encodeOAuthState = (state) => Buffer.from(JSON.stringify(state)).toString('base64url');
+
+const decodeOAuthState = (value) => {
+    if (!value) return {};
+    try {
+        return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    } catch {
+        return {};
+    }
+};
+
+const createGoogleOAuthClient = (redirectUri) => new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    redirectUri || CONFIGURED_GOOGLE_REDIRECT_URI || `${SERVER_URL}/auth/google/callback`
+);
+
+const isAllowedCorsOrigin = (origin) => {
+    if (!origin || allowedOrigins.includes(origin)) return true;
+
+    const originUrl = parseUrlOrigin(origin);
+    if (!originUrl) return false;
+
+    try {
+        const { hostname, protocol } = new URL(originUrl);
+        const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+        const isVercelPreview = protocol === 'https:' && hostname.endsWith('.vercel.app');
+
+        return isLocalhost || isVercelPreview;
+    } catch {
+        return false;
+    }
+};
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        if (isAllowedCorsOrigin(origin)) return callback(null, true);
         return callback(new Error(`Origin ${origin} is not allowed by CORS`));
     },
     credentials: true // Required for session cookies
@@ -42,7 +121,7 @@ app.use(session({
     resave: false,
     saveUninitialized: true,
     cookie: {
-        secure: isProduction,
+        secure: isProduction ? 'auto' : false,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 24 * 60 * 60 * 1000
     }
@@ -79,18 +158,31 @@ if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
 app.use('/output', express.static(outputDir));
 
-// OAuth2 Setup
-const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    GOOGLE_REDIRECT_URI
-);
+// ─── Job Queue (in-memory) ───────────────────────────────────────────────────
+// Stores job state so the client can poll instead of waiting for a long HTTP response.
+const jobs = {}; // { [jobId]: { status, result, error } }
+
+const createJob = (id) => { jobs[id] = { status: 'processing', result: null, error: null }; };
+const finishJob = (id, result) => { if (jobs[id]) { jobs[id].status = 'done'; jobs[id].result = result; } };
+const failJob  = (id, err)    => { if (jobs[id]) { jobs[id].status = 'failed'; jobs[id].error = err; } };
+
+// Clean up finished jobs after 30 minutes
+setInterval(() => {
+    const cutoff = Date.now() - 30 * 60 * 1000;
+    Object.keys(jobs).forEach(id => {
+        if (jobs[id]._ts && jobs[id]._ts < cutoff) delete jobs[id];
+    });
+}, 5 * 60 * 1000);
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/api/debug/oauth', (req, res) => {
+    const googleRedirectUri = getGoogleRedirectUri(req);
     res.json({
-        serverUrl: SERVER_URL,
-        clientUrl: CLIENT_URL,
-        googleRedirectUri: GOOGLE_REDIRECT_URI,
+        serverUrl: getRequestBaseUrl(req),
+        clientUrl: getClientBaseUrl(req),
+        googleRedirectUri,
+        googleAuthorizedRedirectUriRequired: googleRedirectUri,
+        googleConsoleHint: 'Add this exact URI in Google Cloud Console > APIs & Services > Credentials > OAuth 2.0 Client > Authorized redirect URIs.',
         hasGoogleClientId: !!process.env.GOOGLE_CLIENT_ID,
         hasGoogleClientSecret: !!process.env.GOOGLE_CLIENT_SECRET
     });
@@ -99,26 +191,45 @@ app.get('/api/debug/oauth', (req, res) => {
 app.get('/auth/google', (req, res) => {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
         console.error('Google OAuth is not configured. Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET.');
-        return res.redirect(`${CLIENT_URL}/dashboard?auth=google-config-error`);
+        return res.redirect(`${getClientBaseUrl(req)}/dashboard?auth=google-config-error`);
     }
 
-    console.log(`Starting Google OAuth with redirect URI: ${GOOGLE_REDIRECT_URI}`);
+    const redirectUri = getGoogleRedirectUri(req);
+    const returnTo = getClientBaseUrl(req);
+    const oauth2Client = createGoogleOAuthClient(redirectUri);
+
+    req.session.googleRedirectUri = redirectUri;
+    req.session.googleReturnTo = returnTo;
+
+    console.log(`Starting Google OAuth with redirect URI: ${redirectUri}`);
 
     const url = oauth2Client.generateAuthUrl({
         access_type: 'offline', // ensures we get a refresh token
         scope: ['https://www.googleapis.com/auth/youtube.upload'],
-        prompt: 'consent'
+        prompt: 'consent select_account',
+        state: encodeOAuthState({ redirectUri, returnTo })
     });
     res.redirect(url);
 });
 
 app.get('/auth/google/callback', async (req, res) => {
+    const state = decodeOAuthState(req.query.state);
+    const returnTo = getClientBaseUrl(req, state);
+    const redirectUri = state.redirectUri || req.session.googleRedirectUri || getGoogleRedirectUri(req);
+
     try {
-        const { code } = req.query;
+        const { code, error, error_description } = req.query;
+        if (error) {
+            console.error('Google OAuth rejected request:', error, error_description || '');
+            return res.redirect(`${returnTo}/dashboard?auth=${OAUTH_SETUP_ERROR}`);
+        }
         if (!code) throw new Error("No code provided");
 
+        const oauth2Client = createGoogleOAuthClient(redirectUri);
         const { tokens } = await oauth2Client.getToken(code);
         req.session.tokens = tokens; // Save to user's local browser session
+        req.session.googleRedirectUri = redirectUri;
+        req.session.googleReturnTo = returnTo;
         
         // Save to DB linking User ID to Tokens
         if (req.session.userId) {
@@ -128,16 +239,17 @@ app.get('/auth/google/callback', async (req, res) => {
             saveDb(db);
         }
         
-        res.redirect(`${CLIENT_URL}/dashboard?auth=success`);
+        res.redirect(`${returnTo}/dashboard?auth=success`);
     } catch (e) {
         console.error("Auth Error:", e.message);
-        res.redirect(`${CLIENT_URL}/dashboard?auth=error`);
+        res.redirect(`${returnTo}/dashboard?auth=error`);
     }
 });
 
 app.post('/api/auth/register', (req, res) => {
     const { email, password } = req.body;
     if(!email || !password) return res.status(400).json({error: "Email and password required"});
+    if(password.length < 6) return res.status(400).json({error: "Password must be at least 6 characters"});
     const db = getDb();
     if(db.users[email] && db.users[email].password) return res.status(400).json({error: "User already exists"});
     if(!db.users[email]) db.users[email] = {};
@@ -146,7 +258,7 @@ app.post('/api/auth/register', (req, res) => {
     db.users[email].createdAt = new Date().toISOString();
     saveDb(db);
     req.session.userId = email;
-    res.json({ status: 'success' });
+    res.json({ status: 'success', role: 'user' });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -162,8 +274,11 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
-    req.session.destroy();
-    res.json({ status: 'success' });
+    req.session.destroy((error) => {
+        if (error) return res.status(500).json({ error: 'Unable to log out. Please try again.' });
+        res.clearCookie('connect.sid');
+        res.json({ status: 'success' });
+    });
 });
 
 app.get('/api/admin/users', (req, res) => {
@@ -205,7 +320,7 @@ app.get('/auth/facebook', (req, res) => {
         db.users[req.session.userId].fbLinked = true;
         saveDb(db);
     }
-    res.redirect(`${CLIENT_URL}/dashboard?auth=fb-success`);
+    res.redirect(`${getClientBaseUrl(req)}/dashboard?auth=fb-success`);
 });
 
 // --- Mock Instagram Auth ---
@@ -217,26 +332,67 @@ app.get('/auth/instagram', (req, res) => {
         db.users[req.session.userId].igLinked = true;
         saveDb(db);
     }
-    res.redirect(`${CLIENT_URL}/dashboard?auth=ig-success`);
+    res.redirect(`${getClientBaseUrl(req)}/dashboard?auth=ig-success`);
 });
 
-app.post('/api/generate', async (req, res) => {
-    const { videoUrl, startTime, endTime } = req.body;
-    if(!videoUrl) {
-        return res.status(400).json({ error: 'Video URL is required' });
-    }
-    
-    const jobId = uuidv4();
-    const tempVideoPath = path.join(tempDir, `${jobId}.mp4`);
+// ─── Smart Viral Copywriting Brain ──────────────────────────────────────────
+const generateSmartBrainData = (index, url) => {
+    let baseTopic = ['viral', 'trending', 'masterclass', 'foryou', 'mustwatch'];
+    if(url.toLowerCase().includes('gaming') || url.toLowerCase().includes('twitch')) baseTopic = ['gaming', 'gameplay', 'gamer', 'epic', 'streamer'];
+    if(url.toLowerCase().includes('podcast') || url.toLowerCase().includes('jre')) baseTopic = ['podcast', 'interview', 'mindset', 'growth', 'truth'];
+    if(url.toLowerCase().includes('tech') || url.toLowerCase().includes('code')) baseTopic = ['technology', 'programming', 'developer', 'software', 'techstartup'];
+    const psychologicalHooks = [
+        "99% of people scroll past without realizing this secret. 🛑👇",
+        "Here is the brutal truth nobody tells you about... 🤫🚀",
+        "Wait until the end... the setup is absolutely insane! 🤯🔥",
+        "This might be the craziest strategy ever caught on camera? 📸",
+        "We tested this method and couldn't believe the massive results! 📈✨",
+        "Stop what you're doing and watch this right now. ⏳👀"
+    ];
+    const callToActions = [
+        "Drop a 🔥 in the comments if you agree!",
+        "Save this video for later & share it with someone who needs it 🚀",
+        "What are your thoughts on this? Let's debate below! 💬👇",
+        "Hit Subscribe for more daily high-value content! 📈"
+    ];
+    const hook = psychologicalHooks[index % psychologicalHooks.length];
+    const cta = callToActions[index % callToActions.length];
+    const currentCaption = `${hook}\n\n${cta}`;
+    const allTags = [...baseTopic, 'shorts', 'reels', 'viralvideo', 'fyp', 'explorepage', 'wow'];
+    const currentTags = allTags.sort(() => 0.5 - Math.random()).slice(0, 6);
+    return { currentCaption, currentTags };
+};
 
+// ─── Background worker that actually processes the video ─────────────────────
+const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => {
+    const tempVideoPath = path.join(tempDir, `${jobId}.mp4`);
     try {
-        console.log(`[${jobId}] Started processing: ${videoUrl}`);
-        
+        console.log(`[${jobId}] Downloading: ${videoUrl}`);
+
+        // yt-dlp options tuned for hosted servers (bypasses YouTube bot checks)
         await ytDlp(videoUrl, {
             output: tempVideoPath,
             format: 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            ffmpegLocation: ffmpegInstaller.path
+            ffmpegLocation: ffmpegInstaller.path,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            ],
+            retries: 5,
+            fragmentRetries: 5,
+            // Use the best available format if the preferred one fails
+            noPlaylistVideos: true,
         });
+
+        // Verify download succeeded
+        if (!fs.existsSync(tempVideoPath)) throw new Error('Download failed: output file not created.');
+        const stat = fs.statSync(tempVideoPath);
+        if (stat.size < 10000) throw new Error('Download failed: output file too small (possibly bot-blocked).');
+
+        console.log(`[${jobId}] Download complete (${Math.round(stat.size / 1024)} KB). Processing chunks...`);
 
         const videoDuration = await new Promise((resolve) => {
             ffmpeg.ffprobe(tempVideoPath, (err, metadata) => {
@@ -252,67 +408,26 @@ app.post('/api/generate', async (req, res) => {
             chunksToProcess.push({ start: st, duration: Math.max(1, et - st) });
         } else {
             chunksToProcess.push({ start: 0, duration: 30 });
-            if (videoDuration > 60) chunksToProcess.push({ start: Math.floor(videoDuration * 0.25), duration: 30 });
-            if (videoDuration > 120) chunksToProcess.push({ start: Math.floor(videoDuration * 0.5), duration: 30 });
+            if (videoDuration > 60)  chunksToProcess.push({ start: Math.floor(videoDuration * 0.25), duration: 30 });
+            if (videoDuration > 120) chunksToProcess.push({ start: Math.floor(videoDuration * 0.5),  duration: 30 });
         }
 
         const generatedShorts = [];
-        
-        // --- Advanced AI Brain Logic for Smart Viral Copywriting ---
-        const generateSmartBrainData = (index, url) => {
-            // Contextual extraction
-            let baseTopic = ['viral', 'trending', 'masterclass', 'foryou', 'mustwatch'];
-            if(url.toLowerCase().includes('gaming') || url.toLowerCase().includes('twitch')) baseTopic = ['gaming', 'gameplay', 'gamer', 'epic', 'streamer'];
-            if(url.toLowerCase().includes('podcast') || url.toLowerCase().includes('jre')) baseTopic = ['podcast', 'interview', 'mindset', 'growth', 'truth'];
-            if(url.toLowerCase().includes('tech') || url.toLowerCase().includes('code')) baseTopic = ['technology', 'programming', 'developer', 'software', 'techstartup'];
-            
-            const psychologicalHooks = [
-                "99% of people scroll past without realizing this secret. 🛑👇",
-                "Here is the brutal truth nobody tells you about... 🤫🚀",
-                "Wait until the end... the setup is absolutely insane! 🤯🔥",
-                "This might be the craziest strategy ever caught on camera? 📸",
-                "We tested this method and couldn't believe the massive results! 📈✨",
-                "Stop what you're doing and watch this right now. ⏳👀"
-            ];
-            
-            const callToActions = [
-                "Drop a 🔥 in the comments if you agree!",
-                "Save this video for later & share it with someone who needs it 🚀",
-                "What are your thoughts on this? Let's debate below! 💬👇",
-                "Hit Subscribe for more daily high-value content! 📈"
-            ];
-            
-            const hook = psychologicalHooks[index % psychologicalHooks.length];
-            const cta = callToActions[index % callToActions.length];
-            const currentCaption = `${hook}\n\n${cta}`;
-            
-            // Randomize high-velocity tags
-            const allTags = [...baseTopic, 'shorts', 'reels', 'viralvideo', 'fyp', 'explorepage', 'wow'];
-            const currentTags = allTags.sort(() => 0.5 - Math.random()).slice(0, 6); // Pick 6 random premium tags
-            
-            return { currentCaption, currentTags };
-        };
-
         for (let i = 0; i < chunksToProcess.length; i++) {
             const chunk = chunksToProcess[i];
             const outputPth = path.join(outputDir, `${jobId}-short-${i}.mp4`);
-            
             const { currentCaption, currentTags } = generateSmartBrainData(i, videoUrl);
-            
+
             await new Promise((resolve, reject) => {
                 ffmpeg(tempVideoPath)
                     .seekInput(chunk.start)
                     .setDuration(chunk.duration)
                     .videoFilters([
                         { filter: 'crop', options: 'ih*(9/16):ih' },
-                        { filter: 'eq', options: 'saturation=1.15:contrast=1.05' } 
+                        { filter: 'eq', options: 'saturation=1.15:contrast=1.05' }
                     ])
-                    .audioFilters(['atempo=1.04']) 
-                    .outputOptions([
-                        '-c:v libx264',
-                        '-preset fast',
-                        '-c:a aac'
-                    ])
+                    .audioFilters(['atempo=1.04'])
+                    .outputOptions(['-c:v libx264', '-preset fast', '-c:a aac'])
                     .output(outputPth)
                     .on('end', resolve)
                     .on('error', reject)
@@ -320,20 +435,47 @@ app.post('/api/generate', async (req, res) => {
             });
 
             generatedShorts.push({
-                shortUrl: `${SERVER_URL}/output/${jobId}-short-${i}.mp4`,
+                shortUrl: `${baseUrl}/output/${jobId}-short-${i}.mp4`,
                 title: `Short Variant ${i+1} 🚀`,
                 description: `${currentCaption} #${currentTags.join(' #')}`,
                 tags: currentTags
             });
         }
 
-        if(fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
-        
-        res.json({ status: 'success', data: generatedShorts });
+        if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
+        finishJob(jobId, generatedShorts);
+        console.log(`[${jobId}] Done. ${generatedShorts.length} shorts created.`);
     } catch (error) {
-        if(fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
-        res.status(500).json({ error: 'Failed to process video.', details: error.message });
+        if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
+        console.error(`[${jobId}] Failed:`, error.message);
+        failJob(jobId, error.message);
     }
+};
+
+// POST /api/generate — immediately returns a jobId, processing happens in background
+app.post('/api/generate', (req, res) => {
+    const { videoUrl, startTime, endTime } = req.body;
+    if (!videoUrl) return res.status(400).json({ error: 'Video URL is required' });
+
+    const jobId = uuidv4();
+    createJob(jobId);
+    jobs[jobId]._ts = Date.now();
+
+    // Start processing in background (do NOT await)
+    const baseUrl = getRequestBaseUrl(req);
+    processVideoJob(jobId, videoUrl, startTime, endTime, baseUrl);
+
+    console.log(`[${jobId}] Job queued for: ${videoUrl}`);
+    res.json({ status: 'queued', jobId });
+});
+
+// GET /api/status/:jobId — poll this until status is 'done' or 'failed'
+app.get('/api/status/:jobId', (req, res) => {
+    const job = jobs[req.params.jobId];
+    if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
+    if (job.status === 'done')   return res.json({ status: 'done',   data: job.result });
+    if (job.status === 'failed') return res.json({ status: 'failed', error: job.error });
+    return res.json({ status: 'processing' });
 });
 
 
@@ -354,6 +496,7 @@ app.post('/api/upload', async (req, res) => {
             if(!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
             if(!req.session.tokens) return res.status(401).json({ error: "Please Authorize your YouTube account first!" });
             
+            const oauth2Client = createGoogleOAuthClient(req.session.googleRedirectUri);
             oauth2Client.setCredentials(req.session.tokens);
             const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
             

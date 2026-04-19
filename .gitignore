@@ -4,6 +4,7 @@ backend/node_modules/
 frontend/node_modules/
 dist/
 build/
+*.log
 backend/temp/
 backend/output/
 backend/database.json

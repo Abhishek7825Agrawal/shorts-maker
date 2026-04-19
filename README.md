@@ -63,7 +63,21 @@ In Google Cloud Console, add this exact Authorized redirect URI to the same OAut
 https://your-backend-domain.com/auth/google/callback
 ```
 
+You can confirm the exact value your deployed backend is using by opening:
+
+```text
+https://your-backend-domain.com/api/debug/oauth
+```
+
+Copy the `googleAuthorizedRedirectUriRequired` value into Google Cloud Console. If the frontend is on Vercel and the backend is on another host, keep `NODE_ENV=production`, `CLIENT_URL`, `SERVER_URL`, and `VITE_API_URL` set exactly. This keeps session cookies and OAuth redirects working across domains.
+
 If Google shows `Error 401: invalid_client`, the deployed backend is usually using a missing/wrong `GOOGLE_CLIENT_ID`, missing/wrong `GOOGLE_CLIENT_SECRET`, or a redirect URI that does not belong to that OAuth client.
+
+If Google shows `Error 400: redirect_uri_mismatch`, the exact deployed backend callback URL is missing from `Authorized redirect URIs`.
+
+## Vercel Analytics
+
+Web Analytics is wired through `@vercel/analytics`. After deploying the frontend on Vercel, open the project dashboard, go to Analytics, and enable Web Analytics. Page views will start appearing there after the next production deployment.
 
 ## 🚧 What's Next?
 In the next phases, we will integrate `yt-dlp` and `ffmpeg` in the backend to physically download, trim, and process the videos. We will also hook up MongoDB to securely store social media accounts.

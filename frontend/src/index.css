@@ -50,6 +50,20 @@ body::before {
   100% { transform: translateY(0px); }
 }
 
+@keyframes pulse-bar {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(150%); }
+  100% { transform: translateX(-100%); }
+}
+
+.label-text {
+  color: #94a3b8;
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+  margin-bottom: 4px;
+}
+
 /* Navbar */
 .navbar {
   display: flex;
