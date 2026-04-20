@@ -53,9 +53,16 @@ const getRequestBaseUrl = (req) => {
     return host ? normalizeUrl(`${proto}://${host}`) : SERVER_URL;
 };
 
-const getGoogleRedirectUri = (req) => (
-    CONFIGURED_GOOGLE_REDIRECT_URI || `${getRequestBaseUrl(req)}/auth/google/callback`
-);
+const getGoogleRedirectUri = (req) => {
+    if (CONFIGURED_GOOGLE_REDIRECT_URI) return CONFIGURED_GOOGLE_REDIRECT_URI;
+    
+    let baseUrl = getRequestBaseUrl(req);
+    // Force HTTPS on production for Google OAuth (mandatory)
+    if (isProduction && baseUrl.startsWith('http://')) {
+        baseUrl = baseUrl.replace('http://', 'https://');
+    }
+    return `${baseUrl}/auth/google/callback`;
+};
 
 const getClientBaseUrl = (req, fallbackState = {}) => {
     // Priority 1: Explicit returnTo from state or query (most reliable for OAuth/Redirects)
@@ -251,8 +258,9 @@ app.get('/auth/google/callback', async (req, res) => {
         
         res.redirect(`${returnTo}/dashboard?auth=success`);
     } catch (e) {
-        console.error("Auth Error:", e.message);
-        res.redirect(`${returnTo}/dashboard?auth=error`);
+        console.error("Auth Error Details:", e);
+        const errorMsg = encodeURIComponent(e.message || 'unknown_error');
+        res.redirect(`${returnTo}/dashboard?auth=error&reason=${errorMsg}`);
     }
 });
 
