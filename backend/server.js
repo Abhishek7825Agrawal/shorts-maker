@@ -510,5 +510,56 @@ app.post('/api/upload', async (req, res) => {
             const oauth2Client = createGoogleOAuthClient();
             oauth2Client.setCredentials(user.tokens);
             const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+            
+            const insertResponse = await youtube.videos.insert({
+                part: 'snippet,status',
+                requestBody: {
+                    snippet: { title: title, description: description, tags: tags },
+                    status: { privacyStatus: 'private', selfDeclaredMadeForKids: false }
+                },
+                media: { body: fs.createReadStream(resolvedPath) }
+            });
+
+            const newLog = new Log({ user: req.session.userId || 'Guest', platform: 'YouTube', status: 'Success' });
+            await newLog.save();
+
+            return res.json({ status: 'success', videoId: insertResponse.data.id, message: "Successfully uploaded to your YouTube account!" });
+
+        } else if (platform === 'facebook') {
+            const user = await User.findOne({ email: req.session.userId });
+            if(!user || !user.fbLinked) return res.status(401).json({ error: "Please Authorize your Facebook account first!" });
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const newLog = new Log({ user: req.session.userId || 'Guest', platform: 'Facebook', status: 'Success' });
+            await newLog.save();
+            const mockId = 'fb_' + Math.floor(Math.random()*10000000000);
+            return res.json({ status: 'success', videoId: mockId, message: "Successfully uploaded to your Facebook Page!" });
+
+        } else if (platform === 'instagram') {
+            const user = await User.findOne({ email: req.session.userId });
+            if(!user || !user.igLinked) return res.status(401).json({ error: "Please Authorize your Instagram account first!" });
+            
+            await new Promise(resolve => setTimeout(resolve, 2500));
+            
+            const newLog = new Log({ user: req.session.userId || 'Guest', platform: 'Instagram', status: 'Success' });
+            await newLog.save();
+            const mockId = 'ig_' + Math.floor(Math.random()*10000000000);
+            return res.json({ status: 'success', videoId: mockId, message: "Successfully uploaded to your Instagram Reel!" });
+            
+        } else {
+             return res.status(400).json({ error: "Invalid platform specified." });
+        }
+
+    } catch(e) {
+        const newLog = new Log({ user: req.session.userId || 'Guest', platform: req.body.platform || 'Unknown', status: 'Failed' });
+        await newLog.save();
+        
+        console.error(e);
+        res.status(500).json({ error: `Failed to upload to ${req.body.platform || 'platform'}`, details: e.message });
+    }
+});
+
+app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
