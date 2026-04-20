@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const express = require('express');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const ytDlp = require('yt-dlp-exec');
 const ffmpeg = require('fluent-ffmpeg');
@@ -9,6 +13,7 @@ const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
 const session = require('express-session');
 const { google } = require('googleapis');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
@@ -139,25 +144,51 @@ app.use(session({
     }
 }));
 
-// Local JSON DB
+// --- DATABASE CONFIG ---
+const MONGODB_URI = process.env.MONGODB_URI;
+let useMongoDB = false;
+
+if (MONGODB_URI) {
+    mongoose.connect(MONGODB_URI)
+        .then(() => { console.log('✅ Connected to MongoDB Atlas'); useMongoDB = true; })
+        .catch(err => console.error('❌ MongoDB Connection Error:', err));
+} else {
+    console.warn('⚠️ No MONGODB_URI found. Using local ephemeral JSON storage (not persistent on Render).');
+}
+
+const userSchema = new mongoose.Schema({
+    email: { type: String, unique: true, required: true },
+    password: { type: String, required: true },
+    role: { type: String, default: 'user' },
+    tokens: Object,
+    fbLinked: Boolean,
+    igLinked: Boolean,
+    createdAt: { type: Date, default: Date.now }
+});
+
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+
 const dbPath = path.join(__dirname, 'database.json');
 if(!fs.existsSync(dbPath)) fs.writeFileSync(dbPath, JSON.stringify({users: {}, logs: []}));
+
 const getDb = () => JSON.parse(fs.readFileSync(dbPath));
 const saveDb = (data) => fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
 
-const ensureAdminUser = () => {
+const ensureAdminUser = async () => {
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@shortsmaker.ai';
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
-    const db = getDb();
 
-    if (!db.users[adminEmail] || db.users[adminEmail].password !== adminPassword || db.users[adminEmail].role !== 'admin') {
-        db.users[adminEmail] = {
-            ...(db.users[adminEmail] || {}),
-            password: adminPassword,
-            role: 'admin',
-            createdAt: db.users[adminEmail]?.createdAt || new Date().toISOString()
-        };
-        saveDb(db);
+    if (useMongoDB) {
+        const admin = await User.findOne({ email: adminEmail });
+        if (!admin) {
+            await User.create({ email: adminEmail, password: adminPassword, role: 'admin' });
+        }
+    } else {
+        const db = getDb();
+        if (!db.users[adminEmail]) {
+            db.users[adminEmail] = { password: adminPassword, role: 'admin', createdAt: new Date().toISOString() };
+            saveDb(db);
+        }
     }
 };
 
@@ -251,10 +282,14 @@ app.get('/auth/google/callback', async (req, res) => {
         
         // Save to DB linking User ID to Tokens
         if (req.session.userId) {
-            const db = getDb();
-            if (!db.users[req.session.userId]) db.users[req.session.userId] = {};
-            db.users[req.session.userId].tokens = tokens;
-            saveDb(db);
+            if (useMongoDB) {
+                await User.findOneAndUpdate({ email: req.session.userId }, { tokens: tokens });
+            } else {
+                const db = getDb();
+                if (!db.users[req.session.userId]) db.users[req.session.userId] = {};
+                db.users[req.session.userId].tokens = tokens;
+                saveDb(db);
+            }
         }
         
         res.redirect(`${returnTo}/dashboard?auth=success`);
@@ -265,30 +300,50 @@ app.get('/auth/google/callback', async (req, res) => {
     }
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
     const { email, password } = req.body;
     if(!email || !password) return res.status(400).json({error: "Email and password required"});
-    if(password.length < 6) return res.status(400).json({error: "Password must be at least 6 characters"});
-    const db = getDb();
-    if(db.users[email] && db.users[email].password) return res.status(400).json({error: "User already exists"});
-    if(!db.users[email]) db.users[email] = {};
-    db.users[email].password = password;
-    db.users[email].role = 'user'; // Users can only ever register as a normal 'user'
-    db.users[email].createdAt = new Date().toISOString();
-    saveDb(db);
-    req.session.userId = email;
-    res.json({ status: 'success', role: 'user' });
+    
+    try {
+        if (useMongoDB) {
+            const existing = await User.findOne({ email });
+            if (existing) return res.status(400).json({ error: "User already exists" });
+            const newUser = await User.create({ email, password, role: 'user' });
+            req.session.userId = newUser.email;
+        } else {
+            const db = getDb();
+            if(db.users[email] && db.users[email].password) return res.status(400).json({error: "User already exists"});
+            if(!db.users[email]) db.users[email] = {};
+            db.users[email].password = password;
+            db.users[email].role = 'user';
+            db.users[email].createdAt = new Date().toISOString();
+            saveDb(db);
+            req.session.userId = email;
+        }
+        res.json({ status: 'success', role: 'user' });
+    } catch (e) {
+        res.status(500).json({ error: "Registration failed", details: e.message });
+    }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
-    const db = getDb();
-    const user = db.users[email];
-    if (user && user.password === password) {
-        req.session.userId = email;
-        res.json({ status: 'success', role: user.role });
-    } else {
-        res.status(401).json({ error: 'Invalid credentials' });
+    try {
+        let user;
+        if (useMongoDB) {
+            user = await User.findOne({ email });
+        } else {
+            user = getDb().users[email];
+        }
+
+        if (user && user.password === password) {
+            req.session.userId = email;
+            res.json({ status: 'success', role: user.role });
+        } else {
+            res.status(401).json({ error: 'Invalid credentials' });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Login failed" });
     }
 });
 
@@ -314,26 +369,33 @@ app.get('/api/admin/users', (req, res) => {
     res.json({ status: 'success', users: usersList });
 });
 
-app.get('/api/auth/status', (req, res) => {
-    const db = getDb();
-    const user = req.session.userId ? db.users[req.session.userId] : null;
-    if (!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
-    if (!req.session.fbLinked && user && user.fbLinked) req.session.fbLinked = true;
-    if (!req.session.igLinked && user && user.igLinked) req.session.igLinked = true;
-    res.json({ 
-        loggedIn: !!req.session.userId,
-        email: req.session.userId,
-        role: user ? user.role : null,
-        ytLinked: !!(req.session.tokens || (user && user.tokens)),
-        fbLinked: !!(req.session.fbLinked || (user && user.fbLinked)),
-        igLinked: !!(req.session.igLinked || (user && user.igLinked))
-    });
+app.get('/api/auth/status', async (req, res) => {
+    try {
+        let user;
+        if (useMongoDB) {
+            user = req.session.userId ? await User.findOne({ email: req.session.userId }) : null;
+        } else {
+            const db = getDb();
+            user = req.session.userId ? db.users[req.session.userId] : null;
+        }
+
+        if (!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
+        
+        res.json({ 
+            loggedIn: !!req.session.userId,
+            email: req.session.userId,
+            role: user ? user.role : null,
+            ytLinked: !!(req.session.tokens || (user && user.tokens)),
+            fbLinked: !!(req.session.fbLinked || (user && user.fbLinked)),
+            igLinked: !!(req.session.igLinked || (user && user.igLinked))
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to fetch status" });
+    }
 });
 
 // --- Mock Facebook Auth ---
 app.get('/auth/facebook', (req, res) => {
-    req.session.fbLinked = true;
-    if (req.session.userId) {
         const db = getDb();
         if(!db.users[req.session.userId]) db.users[req.session.userId] = {};
         db.users[req.session.userId].fbLinked = true;
