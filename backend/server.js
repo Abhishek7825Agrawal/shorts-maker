@@ -27,7 +27,7 @@ const clientUrlVariants = new Set([
     ...(process.env.CORS_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean)
 ]);
 const allowedOrigins = [...clientUrlVariants].filter(Boolean);
-const isProduction = process.env.NODE_ENV === 'production' || SERVER_URL.startsWith('https://') || CLIENT_URL.startsWith('https://');
+const isProduction = process.env.NODE_ENV === 'production' || !!(process.env.SERVER_URL || process.env.BACKEND_URL);
 const hasConfiguredClientUrl = !!(process.env.CLIENT_URL || process.env.FRONTEND_URL);
 const hasConfiguredServerUrl = !!(process.env.SERVER_URL || process.env.BACKEND_URL);
 
@@ -131,8 +131,9 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'shortsmaker-super-secret-key',
     resave: false,
     saveUninitialized: true,
+    proxy: true,
     cookie: {
-        secure: isProduction ? 'auto' : false,
+        secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 24 * 60 * 60 * 1000
     }
