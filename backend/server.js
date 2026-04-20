@@ -141,9 +141,19 @@ app.use(session({
 }));
 
 // --- DATABASE CONFIG ---
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB Atlas'))
-  .catch(err => console.error('MongoDB Connection Error:', err));
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+    console.error('CRITICAL ERROR: MONGODB_URI is not defined in environment variables.');
+    process.exit(1);
+}
+
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ Connected to MongoDB Atlas Successfully'))
+  .catch(err => {
+      console.error('❌ MongoDB Connection Error:', err.message);
+      console.error('TIP: If your password has "@", ensure you use "%40" in the URI.');
+  });
 
 // Mongoose Schemas
 const userSchema = new mongoose.Schema({
