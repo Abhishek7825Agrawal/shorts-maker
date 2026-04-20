@@ -400,7 +400,7 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
             noWarnings: true,
             retries: 5,
             fragmentRetries: 5,
-            noPlaylistVideos: true,
+            noPlaylist: true,
         };
 
         try {
