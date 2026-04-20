@@ -389,18 +389,21 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
     try {
         const ytOptions = {
             output: tempVideoPath,
-            format: 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            format: 'best[ext=mp4]/best', // Simplified format for better compatibility on servers
             ffmpegLocation: ffmpegInstaller.path,
-            extractorArgs: 'youtube:player_client=android,web',
-            addHeader: [
-                'referer:youtube.com',
-                'user-agent:com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip'
+            extractorArgs: [
+                '--youtube-skip-dash-manifest',
+                '--no-check-certificate',
+                '--geo-bypass',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
             ],
-            noCheckCertificates: true,
-            noWarnings: true,
-            retries: 5,
-            fragmentRetries: 5,
+            addHeader: [
+                'referer:https://www.youtube.com/',
+                'accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'accept-language:en-US,en;q=0.5'
+            ],
             noPlaylist: true,
+            retries: 3
         };
 
         try {
