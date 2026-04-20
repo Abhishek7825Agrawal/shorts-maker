@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "node -e \"const p=require('path'),{execSync}=require('child_process');try{const b=p.join(p.dirname(require.resolve('yt-dlp-exec/package.json')),'bin','yt-dlp');execSync(b+' -U',{stdio:'inherit'});}catch(e){console.log('yt-dlp update note:',e.message);}\"",
+    "postinstall": "node -e \"const p=require('path'),{execSync}=require('child_process');try{const b=p.join(p.dirname(require.resolve('yt-dlp-exec/lib/index.js')),'..','bin','yt-dlp');execSync(b+' -U',{stdio:'inherit'});}catch(e){console.log('yt-dlp update note:',e.message);}\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -23,6 +23,6 @@
     "googleapis": "^171.4.0",
     "mongoose": "^9.4.1",
     "uuid": "^13.0.0",
-    "yt-dlp-exec": "^1.0.5"
+    "yt-dlp-exec": "^1.0.2"
   }
 }
