@@ -141,19 +141,13 @@ app.use(session({
 }));
 
 // --- DATABASE CONFIG ---
-const MONGODB_URI = process.env.MONGODB_URI;
-let useMongoDB = false;
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('Connected to MongoDB Atlas'))
+  .catch(err => console.error('MongoDB Connection Error:', err));
 
-if (MONGODB_URI) {
-    mongoose.connect(MONGODB_URI)
-        .then(() => { console.log('✅ Connected to MongoDB Atlas'); useMongoDB = true; })
-        .catch(err => console.error('❌ MongoDB Connection Error:', err));
-} else {
-    console.warn('⚠️ No MONGODB_URI found. Using local ephemeral JSON storage (not persistent on Render).');
-}
-
+// Mongoose Schemas
 const userSchema = new mongoose.Schema({
-    email: { type: String, unique: true, required: true },
+    email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     role: { type: String, default: 'user' },
     tokens: Object,
@@ -161,30 +155,23 @@ const userSchema = new mongoose.Schema({
     igLinked: Boolean,
     createdAt: { type: Date, default: Date.now }
 });
+const User = mongoose.model('User', userSchema);
 
-const User = mongoose.models.User || mongoose.model('User', userSchema);
-
-const dbPath = path.join(__dirname, 'database.json');
-if(!fs.existsSync(dbPath)) fs.writeFileSync(dbPath, JSON.stringify({users: {}, logs: []}));
-
-const getDb = () => JSON.parse(fs.readFileSync(dbPath));
-const saveDb = (data) => fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+const logSchema = new mongoose.Schema({
+    user: String,
+    platform: String,
+    status: String,
+    time: { type: Date, default: Date.now }
+});
+const Log = mongoose.model('Log', logSchema);
 
 const ensureAdminUser = async () => {
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@shortsmaker.ai';
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
 
-    if (useMongoDB) {
-        const admin = await User.findOne({ email: adminEmail });
-        if (!admin) {
-            await User.create({ email: adminEmail, password: adminPassword, role: 'admin' });
-        }
-    } else {
-        const db = getDb();
-        if (!db.users[adminEmail]) {
-            db.users[adminEmail] = { password: adminPassword, role: 'admin', createdAt: new Date().toISOString() };
-            saveDb(db);
-        }
+    const admin = await User.findOne({ email: adminEmail });
+    if (!admin) {
+        await User.create({ email: adminEmail, password: adminPassword, role: 'admin' });
     }
 };
 
@@ -204,21 +191,18 @@ if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 app.use('/output', express.static(outputDir));
 
 // ─── Job Queue (in-memory) ───────────────────────────────────────────────────
-// Stores job state so the client can poll instead of waiting for a long HTTP response.
 const jobs = {}; // { [jobId]: { status, result, error } }
 
 const createJob = (id) => { jobs[id] = { status: 'processing', result: null, error: null }; };
 const finishJob = (id, result) => { if (jobs[id]) { jobs[id].status = 'done'; jobs[id].result = result; } };
 const failJob  = (id, err)    => { if (jobs[id]) { jobs[id].status = 'failed'; jobs[id].error = err; } };
 
-// Clean up finished jobs after 30 minutes
 setInterval(() => {
     const cutoff = Date.now() - 30 * 60 * 1000;
     Object.keys(jobs).forEach(id => {
         if (jobs[id]._ts && jobs[id]._ts < cutoff) delete jobs[id];
     });
 }, 5 * 60 * 1000);
-// ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/api/debug/oauth', (req, res) => {
     const googleRedirectUri = getGoogleRedirectUri(req);
@@ -246,10 +230,8 @@ app.get('/auth/google', (req, res) => {
     req.session.googleRedirectUri = redirectUri;
     req.session.googleReturnTo = returnTo;
 
-    console.log(`Starting Google OAuth with redirect URI: ${redirectUri}`);
-
     const url = oauth2Client.generateAuthUrl({
-        access_type: 'offline', // ensures we get a refresh token
+        access_type: 'offline',
         scope: ['https://www.googleapis.com/auth/youtube.upload'],
         prompt: 'consent select_account',
         state: encodeOAuthState({ redirectUri, returnTo })
@@ -263,36 +245,25 @@ app.get('/auth/google/callback', async (req, res) => {
     const redirectUri = state.redirectUri || req.session.googleRedirectUri || getGoogleRedirectUri(req);
 
     try {
-        const { code, error, error_description } = req.query;
-        if (error) {
-            console.error('Google OAuth rejected request:', error, error_description || '');
-            return res.redirect(`${returnTo}/dashboard?auth=${OAUTH_SETUP_ERROR}`);
-        }
+        const { code, error } = req.query;
+        if (error) return res.redirect(`${returnTo}/dashboard?auth=${OAUTH_SETUP_ERROR}`);
         if (!code) throw new Error("No code provided");
 
         const oauth2Client = createGoogleOAuthClient(redirectUri);
         const { tokens } = await oauth2Client.getToken(code);
-        req.session.tokens = tokens; // Save to user's local browser session
-        req.session.googleRedirectUri = redirectUri;
-        req.session.googleReturnTo = returnTo;
+        req.session.tokens = tokens;
         
-        // Save to DB linking User ID to Tokens
         if (req.session.userId) {
-            if (useMongoDB) {
-                await User.findOneAndUpdate({ email: req.session.userId }, { tokens: tokens });
-            } else {
-                const db = getDb();
-                if (!db.users[req.session.userId]) db.users[req.session.userId] = {};
-                db.users[req.session.userId].tokens = tokens;
-                saveDb(db);
-            }
+            await User.findOneAndUpdate(
+                { email: req.session.userId },
+                { tokens: tokens },
+                { upsert: true }
+            );
         }
         
         res.redirect(`${returnTo}/dashboard?auth=success`);
     } catch (e) {
-        console.error("Auth Error Details:", e);
-        const errorMsg = encodeURIComponent(e.message || 'unknown_error');
-        res.redirect(`${returnTo}/dashboard?auth=error&reason=${errorMsg}`);
+        res.redirect(`${returnTo}/dashboard?auth=error&reason=${encodeURIComponent(e.message)}`);
     }
 });
 
@@ -301,37 +272,23 @@ app.post('/api/auth/register', async (req, res) => {
     if(!email || !password) return res.status(400).json({error: "Email and password required"});
     
     try {
-        if (useMongoDB) {
-            const existing = await User.findOne({ email });
-            if (existing) return res.status(400).json({ error: "User already exists" });
-            const newUser = await User.create({ email, password, role: 'user' });
-            req.session.userId = newUser.email;
-        } else {
-            const db = getDb();
-            if(db.users[email] && db.users[email].password) return res.status(400).json({error: "User already exists"});
-            if(!db.users[email]) db.users[email] = {};
-            db.users[email].password = password;
-            db.users[email].role = 'user';
-            db.users[email].createdAt = new Date().toISOString();
-            saveDb(db);
-            req.session.userId = email;
-        }
-        res.json({ status: 'success', role: 'user' });
+        const existingUser = await User.findOne({ email });
+        if(existingUser) return res.status(400).json({error: "User already exists"});
+
+        const newUser = new User({ email, password, role: 'user' });
+        await newUser.save();
+        
+        req.session.userId = email;
+        res.json({ status: 'success' });
     } catch (e) {
-        res.status(500).json({ error: "Registration failed", details: e.message });
+        res.status(500).json({ error: e.message });
     }
 });
 
 app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     try {
-        let user;
-        if (useMongoDB) {
-            user = await User.findOne({ email });
-        } else {
-            user = getDb().users[email];
-        }
-
+        const user = await User.findOne({ email });
         if (user && user.password === password) {
             req.session.userId = email;
             res.json({ status: 'success', role: user.role });
@@ -339,7 +296,7 @@ app.post('/api/auth/login', async (req, res) => {
             res.status(401).json({ error: 'Invalid credentials' });
         }
     } catch (e) {
-        res.status(500).json({ error: "Login failed" });
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -351,68 +308,55 @@ app.post('/api/auth/logout', (req, res) => {
     });
 });
 
-app.get('/api/admin/users', (req, res) => {
-    const db = getDb();
-    // 🛡️ MAX SECURITY: Verify session and role before returning data
-    const currentUser = req.session.userId;
-    if (!currentUser || !db.users[currentUser] || db.users[currentUser].role !== 'admin') {
-        return res.status(403).json({ error: "Access Denied: High-level Admin clearance required." });
-    }
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const currentUserEmail = req.session.userId;
+        if (!currentUserEmail) return res.status(403).json({ error: "Unauthorized" });
 
-    const usersList = Object.keys(db.users).filter(email => db.users[email].password).map(email => ({
-        email, ...db.users[email]
-    }));
-    res.json({ status: 'success', users: usersList });
+        const currentUser = await User.findOne({ email: currentUserEmail });
+        if (!currentUser || currentUser.role !== 'admin') {
+            return res.status(403).json({ error: "Access Denied: High-level Admin clearance required." });
+        }
+
+        const usersList = await User.find({}, { password: 1, email: 1, role: 1, createdAt: 1 });
+        res.json({ status: 'success', users: usersList });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/auth/status', async (req, res) => {
     try {
-        let user;
-        if (useMongoDB) {
-            user = req.session.userId ? await User.findOne({ email: req.session.userId }) : null;
-        } else {
-            const db = getDb();
-            user = req.session.userId ? db.users[req.session.userId] : null;
-        }
-
-        if (!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
-        
+        const user = req.session.userId ? await User.findOne({ email: req.session.userId }) : null;
         res.json({ 
             loggedIn: !!req.session.userId,
             email: req.session.userId,
             role: user ? user.role : null,
-            ytLinked: !!(req.session.tokens || (user && user.tokens)),
-            fbLinked: !!(req.session.fbLinked || (user && user.fbLinked)),
-            igLinked: !!(req.session.igLinked || (user && user.igLinked))
+            ytLinked: !!(user && user.tokens),
+            fbLinked: !!(user && user.fbLinked),
+            igLinked: !!(user && user.igLinked)
         });
     } catch (e) {
-        res.status(500).json({ error: "Failed to fetch status" });
+        res.json({ loggedIn: false });
     }
 });
 
-// --- Mock Facebook Auth ---
-app.get('/auth/facebook', (req, res) => {
-        const db = getDb();
-        if(!db.users[req.session.userId]) db.users[req.session.userId] = {};
-        db.users[req.session.userId].fbLinked = true;
-        saveDb(db);
-    }
-    res.redirect(`${getClientBaseUrl(req)}/dashboard?auth=fb-success`);
-});
-
-// --- Mock Instagram Auth ---
-app.get('/auth/instagram', (req, res) => {
-    req.session.igLinked = true;
+app.get('/auth/facebook', async (req, res) => {
     if (req.session.userId) {
-        const db = getDb();
-        if(!db.users[req.session.userId]) db.users[req.session.userId] = {};
-        db.users[req.session.userId].igLinked = true;
-        saveDb(db);
+        await User.findOneAndUpdate({ email: req.session.userId }, { fbLinked: true });
+        req.session.fbLinked = true;
     }
-    res.redirect(`${getClientBaseUrl(req)}/dashboard?auth=ig-success`);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=fb-success`);
 });
 
-// ─── Smart Viral Copywriting Brain ──────────────────────────────────────────
+app.get('/auth/instagram', async (req, res) => {
+    if (req.session.userId) {
+        await User.findOneAndUpdate({ email: req.session.userId }, { igLinked: true });
+        req.session.igLinked = true;
+    }
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/dashboard?auth=ig-success`);
+});
+
 const generateSmartBrainData = (index, url) => {
     let baseTopic = ['viral', 'trending', 'masterclass', 'foryou', 'mustwatch'];
     if(url.toLowerCase().includes('gaming') || url.toLowerCase().includes('twitch')) baseTopic = ['gaming', 'gameplay', 'gamer', 'epic', 'streamer'];
@@ -440,12 +384,9 @@ const generateSmartBrainData = (index, url) => {
     return { currentCaption, currentTags };
 };
 
-// ─── Background worker that actually processes the video ─────────────────────
 const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => {
     const tempVideoPath = path.join(tempDir, `${jobId}.mp4`);
     try {
-        console.log(`[${jobId}] Starting download for: ${videoUrl}`);
-        
         const ytOptions = {
             output: tempVideoPath,
             format: 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -465,8 +406,6 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
         try {
             await ytDlp(videoUrl, ytOptions);
         } catch (dlError) {
-            console.error(`[${jobId}] yt-dlp first attempt failed. Retrying without format constraints...`);
-            // Attempt a broader format if the specific one fails (common for shorts/specific regions)
             await ytDlp(videoUrl, { 
                 ...ytOptions, 
                 format: 'best[ext=mp4]/best',
@@ -474,12 +413,9 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
             });
         }
 
-        // Verify download succeeded
         if (!fs.existsSync(tempVideoPath)) throw new Error('Download failed: output file not created.');
         const stat = fs.statSync(tempVideoPath);
         if (stat.size < 10000) throw new Error('Download failed: output file too small (possibly bot-blocked).');
-
-        console.log(`[${jobId}] Download complete (${Math.round(stat.size / 1024)} KB). Processing chunks...`);
 
         const videoDuration = await new Promise((resolve) => {
             ffmpeg.ffprobe(tempVideoPath, (err, metadata) => {
@@ -531,15 +467,12 @@ const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => 
 
         if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
         finishJob(jobId, generatedShorts);
-        console.log(`[${jobId}] Done. ${generatedShorts.length} shorts created.`);
     } catch (error) {
         if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
-        console.error(`[${jobId}] Failed:`, error.message);
         failJob(jobId, error.message);
     }
 };
 
-// POST /api/generate — immediately returns a jobId, processing happens in background
 app.post('/api/generate', (req, res) => {
     const { videoUrl, startTime, endTime } = req.body;
     if (!videoUrl) return res.status(400).json({ error: 'Video URL is required' });
@@ -548,15 +481,12 @@ app.post('/api/generate', (req, res) => {
     createJob(jobId);
     jobs[jobId]._ts = Date.now();
 
-    // Start processing in background (do NOT await)
     const baseUrl = getRequestBaseUrl(req);
     processVideoJob(jobId, videoUrl, startTime, endTime, baseUrl);
 
-    console.log(`[${jobId}] Job queued for: ${videoUrl}`);
     res.json({ status: 'queued', jobId });
 });
 
-// GET /api/status/:jobId — poll this until status is 'done' or 'failed'
 app.get('/api/status/:jobId', (req, res) => {
     const job = jobs[req.params.jobId];
     if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
@@ -565,79 +495,20 @@ app.get('/api/status/:jobId', (req, res) => {
     return res.json({ status: 'processing' });
 });
 
-
 app.post('/api/upload', async (req, res) => {
     try {
         const { videoUrl, title, description, tags, platform } = req.body;
-        
-        // Extract filename from the URL, and locate it in the local output directory
         const filename = path.basename(videoUrl);
         const resolvedPath = path.join(outputDir, filename);
         
         if(!fs.existsSync(resolvedPath)) return res.status(404).json({error: "Video file not found."});
         
-        const db = getDb();
-
         if (platform === 'youtube') {
-            const user = req.session.userId ? db.users[req.session.userId] : null;
-            if(!req.session.tokens && user && user.tokens) req.session.tokens = user.tokens;
-            if(!req.session.tokens) return res.status(401).json({ error: "Please Authorize your YouTube account first!" });
+            const user = await User.findOne({ email: req.session.userId });
+            if(!user || !user.tokens) return res.status(401).json({ error: "Please Authorize your YouTube account first!" });
             
-            const oauth2Client = createGoogleOAuthClient(req.session.googleRedirectUri);
-            oauth2Client.setCredentials(req.session.tokens);
+            const oauth2Client = createGoogleOAuthClient();
+            oauth2Client.setCredentials(user.tokens);
             const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-            
-            const insertResponse = await youtube.videos.insert({
-                part: 'snippet,status',
-                requestBody: {
-                    snippet: { title: title, description: description, tags: tags },
-                    status: { privacyStatus: 'private', selfDeclaredMadeForKids: false } // 'private' to prevent accidental live posting while testing
-                },
-                media: { body: fs.createReadStream(resolvedPath) }
-            });
-
-            // Add to Admin Logs
-            db.logs.unshift({ user: req.session.userId || req.sessionID, platform: 'YouTube', status: 'Success', time: new Date().toISOString() });
-            saveDb(db);
-
-            return res.json({ status: 'success', videoId: insertResponse.data.id, message: "Successfully uploaded to your YouTube account!" });
-
-        } else if (platform === 'facebook') {
-            if(!req.session.fbLinked) return res.status(401).json({ error: "Please Authorize your Facebook account first!" });
-            
-            // Mocking Facebook API upload delay
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            db.logs.unshift({ user: req.session.userId || req.sessionID, platform: 'Facebook', status: 'Success', time: new Date().toISOString() });
-            saveDb(db);
-            const mockId = 'fb_' + Math.floor(Math.random()*10000000000);
-            return res.json({ status: 'success', videoId: mockId, message: "Successfully uploaded to your Facebook Page!" });
-
-        } else if (platform === 'instagram') {
-            if(!req.session.igLinked) return res.status(401).json({ error: "Please Authorize your Instagram account first!" });
-            
-            // Mocking Instagram API upload delay
-            await new Promise(resolve => setTimeout(resolve, 2500));
-            
-            db.logs.unshift({ user: req.session.userId || req.sessionID, platform: 'Instagram', status: 'Success', time: new Date().toISOString() });
-            saveDb(db);
-            const mockId = 'ig_' + Math.floor(Math.random()*10000000000);
-            return res.json({ status: 'success', videoId: mockId, message: "Successfully uploaded to your Instagram Reel!" });
-            
-        } else {
-             return res.status(400).json({ error: "Invalid platform specified." });
-        }
-
-    } catch(e) {
-        const db = getDb();
-        db.logs.unshift({ user: req.session.userId || req.sessionID, platform: req.body.platform || 'Unknown', status: 'Failed', time: new Date().toISOString() });
-        saveDb(db);
-        
-        console.error(e);
-        res.status(500).json({ error: `Failed to upload to ${req.body.platform || 'platform'}`, details: e.message });
-    }
-});
-
-app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
