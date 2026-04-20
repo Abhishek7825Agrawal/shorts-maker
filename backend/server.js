@@ -58,14 +58,18 @@ const getGoogleRedirectUri = (req) => (
 );
 
 const getClientBaseUrl = (req, fallbackState = {}) => {
+    // Priority 1: Explicit returnTo from state or query (most reliable for OAuth/Redirects)
+    const stateUrl = parseUrlOrigin(req.query.returnTo || fallbackState.returnTo);
+    if (stateUrl) return stateUrl;
+
+    // Priority 2: Configured URL (default for direct links)
     if (hasConfiguredClientUrl) return CLIENT_URL;
 
-    return (
-        parseUrlOrigin(req.query.returnTo || fallbackState.returnTo) ||
-        parseUrlOrigin(req.get('origin')) ||
-        parseUrlOrigin(req.get('referer')) ||
-        CLIENT_URL
-    );
+    // Priority 3: Dynamic discovery based on headers
+    const discovered = parseUrlOrigin(req.get('origin')) || parseUrlOrigin(req.get('referer'));
+    if (discovered) return discovered;
+
+    return CLIENT_URL;
 };
 
 const encodeOAuthState = (state) => Buffer.from(JSON.stringify(state)).toString('base64url');
@@ -150,6 +154,12 @@ const ensureAdminUser = () => {
 };
 
 ensureAdminUser();
+
+if (isProduction && CLIENT_URL.includes('localhost')) {
+    console.warn('\x1b[33m%s\x1b[0m', '⚠️ WARNING: Running in production mode but CLIENT_URL is set to localhost.');
+    console.warn('\x1b[33m%s\x1b[0m', 'This will cause 404 errors during YouTube OAuth redirects.');
+    console.warn('\x1b[33m%s\x1b[0m', `Current CLIENT_URL: ${CLIENT_URL}`);
+}
 
 const tempDir = path.join(__dirname, 'temp');
 const outputDir = path.join(__dirname, 'output');
@@ -367,29 +377,35 @@ const generateSmartBrainData = (index, url) => {
 const processVideoJob = async (jobId, videoUrl, startTime, endTime, baseUrl) => {
     const tempVideoPath = path.join(tempDir, `${jobId}.mp4`);
     try {
-        console.log(`[${jobId}] Downloading: ${videoUrl}`);
-
-        // KEY FIX: Use Android player client — YouTube never blocks its own Android app
-        // This is the most reliable way to download from server IPs in 2025/2026
-        await ytDlp(videoUrl, {
+        console.log(`[${jobId}] Starting download for: ${videoUrl}`);
+        
+        const ytOptions = {
             output: tempVideoPath,
-            // Prefer 720p mp4, fallback to any best available
             format: 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             ffmpegLocation: ffmpegInstaller.path,
-            // Mimic the official YouTube Android app — bypasses datacenter IP blocks
             extractorArgs: 'youtube:player_client=android,web',
             addHeader: [
                 'referer:youtube.com',
-                // Official YouTube Android app User-Agent
                 'user-agent:com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip'
             ],
             noCheckCertificates: true,
             noWarnings: true,
-            retries: 10,
-            fragmentRetries: 10,
-            // Abort if video is a playlist link (just take first video if so)
+            retries: 5,
+            fragmentRetries: 5,
             noPlaylistVideos: true,
-        });
+        };
+
+        try {
+            await ytDlp(videoUrl, ytOptions);
+        } catch (dlError) {
+            console.error(`[${jobId}] yt-dlp first attempt failed. Retrying without format constraints...`);
+            // Attempt a broader format if the specific one fails (common for shorts/specific regions)
+            await ytDlp(videoUrl, { 
+                ...ytOptions, 
+                format: 'best[ext=mp4]/best',
+                retries: 3 
+            });
+        }
 
         // Verify download succeeded
         if (!fs.existsSync(tempVideoPath)) throw new Error('Download failed: output file not created.');
