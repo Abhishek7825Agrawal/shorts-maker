@@ -310,6 +310,22 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+app.post('/api/auth/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ error: "No account found with this email." });
+
+        // LOGIC: In a real app, generate a token and send an email using Nodemailer
+        console.log(`[RESET PASSWORD] Request for: ${email}`);
+        console.log(`[SIMULATION] Sending reset link to ${email}... (Reset Link: http://shorts-maker-alpha.vercel.app/reset-password?email=${email})`);
+
+        res.json({ status: 'success', message: "Reset instructions sent to your email." });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/auth/logout', (req, res) => {
     req.session.destroy((error) => {
         if (error) return res.status(500).json({ error: 'Unable to log out. Please try again.' });

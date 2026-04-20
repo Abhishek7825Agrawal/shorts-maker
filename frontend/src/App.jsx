@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Scissors, ShieldCheck, Video, LayoutDashboard, UserCircle, LogOut } from 'lucide-react';
+import { Scissors, ShieldCheck, Video, LayoutDashboard, UserCircle, LogOut, Eye, EyeOff, Mail } from 'lucide-react';
 
 const Youtube = ({ size = 24, color = "currentColor" }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -341,20 +341,49 @@ const AuthLayout = ({ title, subtitle, children, footer }) => (
   </div>
 );
 
-const AuthForm = ({ buttonText, onSubmit, email, password, setEmail, setPassword, error, loading }) => (
-  <form onSubmit={onSubmit}>
-    <div className="input-group" style={{flexDirection: 'column'}}>
-      <label className="label-text">Email Address</label>
-      <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required disabled={loading} />
-      <label className="label-text">Password</label>
-      <input type="password" value={password} onChange={e=>setPassword(e.target.value)} required disabled={loading} minLength={6} />
-      {error && <p style={{color: '#ff4d4f', margin: '5px 0'}}>{error}</p>}
-      <button type="submit" className="action-btn" disabled={loading}>
-        {loading ? 'Please wait...' : buttonText}
-      </button>
-    </div>
-  </form>
-);
+const AuthForm = ({ buttonText, onSubmit, email, password, setEmail, setPassword, error, loading, showForgot = false }) => {
+  const [showPass, setShowPass] = useState(false);
+  return (
+    <form onSubmit={onSubmit}>
+      <div className="input-group" style={{flexDirection: 'column'}}>
+        <label className="label-text">Email Address</label>
+        <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required disabled={loading} placeholder="Enter your email" />
+        
+        <label className="label-text">Password</label>
+        <div style={{position: 'relative', width: '100%'}}>
+          <input 
+            type={showPass ? "text" : "password"} 
+            value={password} 
+            onChange={e=>setPassword(e.target.value)} 
+            required 
+            disabled={loading} 
+            minLength={6} 
+            placeholder="Enter password"
+            style={{paddingRight: '45px'}}
+          />
+          <button 
+            type="button" 
+            onClick={() => setShowPass(!showPass)} 
+            style={{position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '5px'}}
+          >
+            {showPass ? <EyeOff size={20} /> : <Eye size={20} />}
+          </button>
+        </div>
+
+        {showForgot && (
+          <div style={{textAlign: 'right', marginTop: '-10px', marginBottom: '10px'}}>
+            <Link to="/forgot-password" style={{color: '#94a3b8', fontSize: '0.85rem', textDecoration: 'none'}}>Forgot Password?</Link>
+          </div>
+        )}
+
+        {error && <p style={{color: '#ff4d4f', margin: '5px 0', fontSize: '0.9rem'}}>{error}</p>}
+        <button type="submit" className="action-btn" disabled={loading} style={{marginTop: '10px'}}>
+          {loading ? 'Please wait...' : buttonText}
+        </button>
+      </div>
+    </form>
+  );
+};
 
 const Login = ({ setIsAuthenticated, setRole }) => {
   const navigate = useNavigate();
@@ -406,6 +435,7 @@ const Login = ({ setIsAuthenticated, setRole }) => {
         setPassword={setPassword}
         error={error}
         loading={loading}
+        showForgot={true}
       />
     </AuthLayout>
   );
@@ -463,6 +493,55 @@ const Register = ({ setIsAuthenticated, setRole }) => {
         error={error}
         loading={loading}
       />
+    </AuthLayout>
+  );
+};
+
+const ForgotPassword = () => {
+  const [email, setEmail] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState(null);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true); setError(null); setMessage(null);
+    try {
+      const res = await fetch(apiUrl('/api/auth/forgot-password'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setMessage("Success! Password reset instructions sent to your email.");
+      } else {
+        setError(data.error || "Something went wrong.");
+      }
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <AuthLayout
+      title="Reset Password"
+      subtitle="Enter your email to receive a reset link."
+      footer={<p style={{marginTop: '20px', color: '#94a3b8'}}>Remembered? <Link to="/login" style={{color: '#4facfe', fontWeight: 'bold'}}>Back to Login</Link></p>}
+    >
+      <form onSubmit={handleSubmit}>
+        <div className="input-group" style={{flexDirection: 'column'}}>
+          <label className="label-text">Email Address</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required disabled={loading} placeholder="Enter your email" />
+          {message && <p style={{color: '#4ade80', fontSize: '0.9rem', marginTop: '10px'}}>{message}</p>}
+          {error && <p style={{color: '#ff4d4f', fontSize: '0.9rem', marginTop: '10px'}}>{error}</p>}
+          <button type="submit" className="action-btn" disabled={loading} style={{marginTop: '20px'}}>
+            {loading ? 'Sending...' : 'Send Reset Link'}
+          </button>
+        </div>
+      </form>
     </AuthLayout>
   );
 };
@@ -600,6 +679,7 @@ function App() {
         <Route path="/" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />} />
         <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login setIsAuthenticated={setIsAuthenticated} setRole={setRole}/>} />
         <Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Register setIsAuthenticated={setIsAuthenticated} setRole={setRole}/>} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/dashboard" element={<RequireAuth isAuthenticated={isAuthenticated}><Dashboard /></RequireAuth>} />
         <Route path="/admin" element={<RequireAdmin isAuthenticated={isAuthenticated} role={role}><Admin /></RequireAdmin>} />
         <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />} />
